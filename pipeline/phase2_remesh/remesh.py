@@ -177,8 +177,8 @@ def decimate_mesh(input_obj: Path, target_ratio: float, output_obj: Path) -> dic
     # installed pymeshlab version via ms.filter_parameter_values(...).
     ms.meshing_decimation_quadric_edge_collapse_with_texture(
         targetfacenum=target_face_num,
-        qualitythr=0.1,
-        extratcoordw=1.0,
+        qualitythr=0,
+        extratcoordw=0.1,
         preserveboundary=False,
         boundaryweight=1,
         optimalplacement=True,
