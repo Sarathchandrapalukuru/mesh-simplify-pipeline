@@ -1,0 +1,179 @@
+# TripoSR Environment Setup — Process Log
+
+**Goal:** Run TripoSR (single-image → triplane → NeRF → mesh) locally with RTX 3050, with GPU-accelerated mesh extraction via `torchmcubes`.
+
+**Status:** ✅ Working — image → textured mesh pipeline runs end-to-end.
+
+---
+
+## Final Environment Summary
+
+| Component | Version | Notes |
+|---|---|---|
+| Python | 3.10.13 | via conda |
+| conda env name | `2d_to_3d` | |
+| PyTorch | 2.1.2+cu118 | pinned — do not let this drift |
+| CUDA (runtime, PyTorch-matched) | 11.8 | standalone NVIDIA installer, **not** conda |
+| CUDA compiler toolchain | NVIDIA CUDA 11.8 standalone install | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\` |
+| MSVC compiler | VS2022 Build Tools, older v143 subversion (~14.36) | pinned via `-vcvars_ver` flag |
+| numpy | <2.0 (currently 1.26.4) | must stay pinned — torch 2.1.2 breaks on numpy 2.x |
+| torchmcubes | 0.1.0, built from source with CUDA support | the main blocker of this whole process |
+
+---
+
+## Setup Steps (in order)
+
+### 1. Conda environment
+```powershell
+conda create -n 2d_to_3d python=3.10.13 -y
+conda activate 2d_to_3d
+```
+
+### 2. PyTorch (CUDA 11.8 build, via pip)
+```powershell
+pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
+```
+
+### 3. numpy pin
+```powershell
+pip install "numpy<2"
+```
+
+### 4. CUDA 11.8 Toolkit — standalone installer (NOT conda)
+Downloaded from: `https://developer.nvidia.com/cuda-11-8-0-download-archive`
+- Custom install
+- Unchecked: Display Driver, NVIDIA GeForce Experience components, PhysX
+- Kept: CUDA (Development, Runtime, Visual Studio Integration)
+- Default install path used: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\`
+
+### 5. VS2022 Build Tools
+Installed via `https://aka.ms/vs/17/release/vs_buildtools.exe`
+- Workload: "Desktop development with C++"
+- **Note:** the default install pulled the *latest* MSVC v143 subversion (14.44), which turned out to be too new for CUDA 11.8 (see Issue #5 below). An older v143 subversion (~14.36) was added via Individual Components and pinned explicitly at build time.
+
+### 6. TripoSR repo
+```powershell
+git clone https://github.com/VAST-AI-Research/TripoSR.git
+cd TripoSR
+```
+
+### 7. Dependencies (installed incrementally, see issues below for why)
+```powershell
+pip install rembg onnxruntime trimesh einops xatlas omegaconf transformers==4.35.0 huggingface_hub Pillow imageio[ffmpeg] gradio moderngl
+```
+
+### 8. torchmcubes (built from source, CUDA-enabled)
+```powershell
+# In a shell with VS2022 dev environment loaded (older MSVC pinned) + conda env active:
+$env:PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin;" + $env:PATH
+$env:CUDACXX = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin\nvcc.exe"
+$env:CMAKE_GENERATOR = "Ninja"
+$env:NVCC_APPEND_FLAGS = "-allow-unsupported-compiler"
+pip install git+https://github.com/tatsy/torchmcubes.git --no-cache-dir --force-reinstall
+```
+
+### 9. Re-pin torch after torchmcubes install (see Issue #6)
+```powershell
+pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118 --force-reinstall
+pip install "numpy<2" --force-reinstall
+```
+
+### 10. Run inference
+```powershell
+python run.py examples/chair.png --output-dir output/ --bake-texture
+```
+
+---
+
+## Issues Encountered & Resolutions
+
+### Issue 1: NumPy 1.x/2.x binary incompatibility
+**Symptom:** `Failed to initialize NumPy: _ARRAY_API not found` warning on `import torch`.
+**Cause:** conda installed numpy 2.2.6 as a transitive dependency; torch 2.1.2 was compiled against numpy 1.x's C API.
+**Fix:** `pip install "numpy<2"`. Re-pinned again later after Issue 6 caused it to drift back to 2.x.
+
+### Issue 2: `huggingface-hub` version conflict
+**Symptom:** `ResolutionImpossible` — `transformers==4.35.0`'s dependency `tokenizers` requires `huggingface_hub<0.18`, conflicting with an explicit `>=0.19` pin we'd set.
+**Fix:** Removed the version pin entirely on `huggingface-hub` in requirements.txt; let pip resolve it naturally.
+
+### Issue 3: conda's `cudatoolkit` (and later `cuda-toolkit`) packages didn't provide a usable compiler
+**Symptom:** `torchmcubes` build failed with `Could not find CUDA` / missing `CUDA_INCLUDE_DIRS` — the conda-forge `cudatoolkit=11.8` package is runtime-only (no `nvcc`, no dev headers).
+**Fix attempt 1:** Switched to `conda install -c nvidia cuda-toolkit=11.8` — this resolved to CUDA 12.4 components instead of 11.8 (conda channel resolution drifted to a newer bundle despite the explicit version request).
+**Fix attempt 2:** Re-pinned via `nvidia/label/cuda-11.8.0` channel — this also resolved incorrectly, landing on CUDA 12.9.
+**Root cause:** conda's package metadata for `cuda-toolkit=11.8.0` did not reliably guarantee 11.8 sub-components (e.g. `cuda-nvcc`) were actually version 11.8 — multiple different nvcc binaries (12.4, 12.9) existed in the conda package cache despite the top-level package claiming 11.8.
+**Final fix:** Abandoned conda for CUDA entirely. Installed CUDA 11.8 via NVIDIA's standalone Windows installer instead, which guarantees an exact, unambiguous version at a fixed path.
+
+### Issue 4: `Visual Studio 18 2026` (VS2026) incompatible with CUDA
+**Symptom:** `CMake Error ... No CUDA toolset found` when using the default Visual Studio CMake generator; later, after forcing `-allow-unsupported-compiler`, a hard crash: `nvcc error: 'cudafe++' died with status 0xC0000005 (ACCESS_VIOLATION)`.
+**Cause:** The machine's only installed Visual Studio was version 2026 (MSVC 19.51), released after CUDA's officially supported compiler range (2017–2022 / MSVC up to ~19.4x). This isn't a soft version-check issue — CUDA's `cudafe++` parser genuinely could not parse VS2026's headers, unrelated to the version-check override.
+**Fix:** Installed VS2022 Build Tools as a separate, standalone toolset (coexists with VS2026). Forced CMake to use the Ninja generator (`$env:CMAKE_GENERATOR = "Ninja"`) instead of the Visual Studio generator, and explicitly loaded the VS2022 developer environment via its own `vcvars64.bat` before building.
+
+### Issue 5: VS2022 Build Tools auto-installed too new an MSVC subversion for CUDA 11.8
+**Symptom:** After correctly loading VS2022 (confirmed via `cl` showing `19.44.x`, not `19.51.x`), build failed with:
+```
+error STL1002: Unexpected compiler version, expected CUDA 12.4 or newer.
+```
+**Cause:** VS2022 Build Tools by default installs the *latest* MSVC v143 subversion (14.44 in this case), whose STL headers explicitly reject being used with CUDA 11.8 (they expect CUDA 12.4+). This is a real, documented version-pairing constraint, not a bug.
+**Fix:** Installed an older MSVC v143 subversion (~14.36) alongside the default one via Visual Studio Installer → "Individual Components". Loaded it explicitly at build time with:
+```powershell
+vcvars64.bat -vcvars_ver=14.36
+```
+This, combined with `-allow-unsupported-compiler` (needed as a secondary safety net) finally allowed the build to succeed.
+
+### Issue 6: `torchmcubes` install silently upgraded torch to 2.13.0
+**Symptom:** After torchmcubes finally built successfully, pip's dependency resolver upgraded `torch` from `2.1.2+cu118` to `2.13.0` (a generic, non-CUDA-11.8-matched build) and `numpy` back to `2.2.6`, because `torchmcubes`'s own `setup.py` requests unpinned `torch`.
+**Fix:** Re-ran the original pinned torch install with `--force-reinstall` immediately after, plus re-pinned numpy again. `torchmcubes` itself did not need rebuilding — the compiled extension remained valid.
+
+### Issue 7: Multiple conflicting `nvcc` installs caused inconsistent `nvcc --version` results across terminal sessions
+**Symptom:** `nvcc --version` printed different CUDA versions (12.4, then 12.9, then correct 11.8) depending on which terminal window / activation order was used, despite explicit `$env:PATH` and `$env:CUDACXX` overrides.
+**Cause:** Several CUDA installs coexisted on the machine (system-wide 12.4/12.9 installer remnants, conda cache copies, the new standalone 11.8), and PowerShell session state (aliases, PATH ordering) varied depending on how the terminal was opened and what had been run in it previously.
+**Fix:** Standardized on always loading environments in one continuous, fresh PowerShell session per attempt (VS2022 env → conda activate → explicit CUDA PATH/CUDACXX override, all in the same window without closing/reopening), and verified with `Get-Command nvcc -All` / full-disk search (`Get-ChildItem -Recurse`) rather than trusting `where` or bare `nvcc --version` alone.
+
+### Issue 8: Various `ModuleNotFoundError`s after the torchmcubes `--force-reinstall` cycles
+**Symptom:** `rembg`, `onnxruntime`, `transformers`, and others reported missing after previously being installed.
+**Cause:** Repeated `--force-reinstall` operations during the torchmcubes debugging appear to have disturbed or removed some previously-installed packages as a side effect.
+**Fix:** Reinstalled each individually as encountered — all were safe, standalone pip installs with no CUDA/version sensitivity (except `transformers`, reinstalled at the pinned `4.35.0` to stay compatible with `huggingface_hub`'s resolved version).
+
+### Issue 9: conda storage ballooned to ~35GB
+**Cause:** Accumulated cached package tarballs from every CUDA version attempted (12.4, 12.9, 11.8) plus repeated `--force-reinstall` cycles.
+**Fix:**
+```powershell
+conda clean --all -y
+pip cache purge
+```
+
+### Issue 10: No textures in output mesh
+**Symptom:** `.obj` output had geometry only, no color/texture.
+**Cause:** Not a bug — TripoSR's `run.py` only bakes textures when explicitly requested.
+**Fix:**
+```powershell
+python run.py examples/chair.png --output-dir output/ --bake-texture
+```
+
+---
+
+### Issue 11: `bake_texture.py` device mismatch errors (`--bake-texture` flag)
+**Symptom 1:** `RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!` in `query_triplane` / `grid_sample`, inside `positions_to_colors` in `tsr/bake_texture.py`.
+**Cause:** A positions tensor used for texture baking was created without being moved to the CUDA device before being passed into a CUDA-based operation — an environment/version mismatch bug in TripoSR's own code, not something we introduced.
+**Fix:** In `tsr/bake_texture.py`, inside `positions_to_colors`, ensured the positions tensor passed to `model.renderer.query_triplane(...)` is moved to the correct device (`.to(<device>)`) before the call.
+
+**Symptom 2 (after fixing Symptom 1):** `TypeError: can't convert cuda:0 device type tensor to numpy. Use Tensor.cpu() to copy the tensor to host memory first.` at line 146 in the same file:
+```python
+rgb_f = queried_grid["color"].numpy().reshape(-1, 3)
+```
+**Cause:** `.numpy()` cannot be called directly on a CUDA tensor — it must be moved to CPU first. Missing `.cpu()` call in the source.
+**Fix:**
+```python
+rgb_f = queried_grid["color"].cpu().numpy().reshape(-1, 3)
+```
+**Note:** Geometry-only extraction (without `--bake-texture`) worked correctly on the first try with no errors — model init, image processing, forward pass, and mesh extraction all succeeded end-to-end before texture baking was ever attempted. These bugs are isolated to the optional texture-baking code path.
+
+---
+
+## Key Lessons for Future Setup (new machine, fresh env, etc.)
+
+1. **Never install CUDA toolkit via conda for anything that needs to compile CUDA extensions.** Conda's channel resolution is unreliable for exact version pinning. Use NVIDIA's standalone installer instead.
+2. **Check installed Visual Studio version before starting.** If it's newer than VS2022, install VS2022 Build Tools separately — don't assume the default/latest MSVC subversion works even within VS2022, since CUDA has hard version ceilings (11.8 needs MSVC ≤ ~14.36-ish, not the latest 14.44).
+3. **Always pin `torch` explicitly after installing any package that lists `torch` as an unpinned dependency** (like `torchmcubes`) — re-run the exact pinned torch install command afterward as a matter of course.
+4. **Do a fresh PowerShell session per build attempt** when juggling multiple compiler/CUDA environments — don't trust state carried over from earlier experiments in the same window.
+5. **Verify versions with full paths, not bare commands**, when multiple installs of the same tool might exist (`Get-Command -All`, explicit `&"full\path\to\exe"`, or a disk-wide search) rather than trusting `nvcc --version` or `where` alone.

@@ -1,0 +1,137 @@
+# Phase 3 — Evaluation Render Harness
+
+Renders each mesh (high-poly reference + every `ratio_X` decimated mesh) from a
+fixed, identical camera + lighting rig, so that Phase 4 can compute image-level
+metrics (PSNR/SSIM) that reflect actual geometry/texture differences — not
+differences caused by inconsistent framing or lighting.
+
+## Directory layout
+
+```
+pipeline/phase3_evaluate/
+    render_harness.py      # this script (Blender headless)
+    README.md              # this file
+```
+
+Input (already produced by Phase 1 / Phase 2):
+
+```
+data/outputs/<run_id>/phase1_highpoly/mesh.obj      (+ texture.png)
+data/outputs/<run_id>/phase2_lowpoly/ratio_0.5/mesh.obj (+ texture.png)
+data/outputs/<run_id>/phase2_lowpoly/ratio_0.2/mesh.obj
+data/outputs/<run_id>/phase2_lowpoly/ratio_0.1/mesh.obj
+data/outputs/<run_id>/phase2_lowpoly/ratio_0.05/mesh.obj
+```
+
+Output:
+
+```
+data/outputs/<run_id>/phase3_renders/
+    highpoly/view_00.png ... view_11.png
+    ratio_0.5/view_00.png ... view_11.png
+    ratio_0.2/...
+    ratio_0.1/...
+    ratio_0.05/...
+```
+
+Same view indices across every folder → Phase 4 pairs by filename.
+
+## Usage
+
+```powershell
+blender --background --python .\pipeline\phase3_evaluate\render_harness.py -- --run-dir "data/outputs/chair_run1"
+```
+
+Optional flags: `--views` (informational only right now — see design decisions
+below), `--resolution` (default 1024), `--ring-views` (default 8),
+`--top-views` (default 4).
+
+## Design decisions
+
+- **12-view 2-ring camera rig**: 8 views in a lower ring at 15° elevation
+  (catches ground-level silhouette errors), 4 views in an upper ring at 55°
+  elevation offset in azimuth from the lower ring (catches top/pole geometry
+  a flat turntable would miss).
+- **Camera bbox/distance locked to the high-poly mesh, computed once**: every
+  ratio_X mesh is rendered through the *exact same* camera positions. If each
+  mesh's own bbox were used instead, shrinkage from aggressive decimation
+  would get silently re-framed to fill the frame the same way every time —
+  masking exactly the distortion we're trying to measure. This is the
+  standard convention in mesh-simplification/neural-rendering evaluation
+  literature: one fixed rig derived from a reference mesh, reused verbatim
+  across all compared variants.
+- **Renderer: Eevee (Blender 5.1 identifier `BLENDER_EEVEE`, internally
+  "Eevee Next")** — chosen for headless batch speed on a 4GB VRAM card, at
+  the cost of some physical accuracy vs Cycles. Revisit if Phase 4 results
+  seem inconsistent with Chamfer distance and Cycles is worth the time cost.
+- **Transparent background** (`film_transparent=True`, RGBA PNG output) — so
+  PSNR/SSIM comparisons aren't influenced by background color/gradient
+  choices.
+- **Fixed 3-point lighting (key/fill/rim)**, sized relative to mesh radius
+  and reused identically for every mesh in a run, so shading differences
+  never confound geometry/texture differences. Energies were originally
+  800/300/500W (blew out detail); reduced to 150/60/90W, routed through a
+  single `LIGHT_BRIGHTNESS_MULTIPLIER` constant for easy one-line tuning.
+- **Fixed FOV (50°)** on the camera, not derived per-mesh, for the same
+  reason as the locked bbox above.
+
+## Known issues encountered + fixes
+
+| Issue | Cause | Fix |
+|---|---|---|
+| `TypeError: enum "BLENDER_EEVEE_NEXT" not found` | Blender 5.1 kept the legacy `BLENDER_EEVEE` enum string even though the underlying engine is Eevee Next | Use `scene.render.engine = "BLENDER_EEVEE"` |
+| Textures not appearing (flat grey/blank) | TripoSR outputs `mesh.obj` + `texture.png` as separate files with **no `.mtl`** linking them, so the OBJ importer has nothing to attach | After import, check each object for an existing image texture (`_has_image_texture`); if none, manually build a Principled BSDF material and wire `texture.png` into Base Color (`_attach_texture`) |
+| Mesh imported sideways (needed manual −90° X rotation) | OBJ is Y-up by convention; Blender is Z-up; default importer axis args weren't matching | Pass `forward_axis="Y", up_axis="Z"` explicitly to `bpy.ops.wm.obj_import` |
+| Renders looked blown-out / hard to spot errors | Light energies too high (800/300/500W) | Reduced to 150/60/90W + added `LIGHT_BRIGHTNESS_MULTIPLIER = 0.15` as a single tuning knob |
+| Background looked black instead of transparent | Likely a viewer issue (Windows Photos renders transparent PNG regions as black instead of checkerboard), not a render bug — `film_transparent=True` + RGBA output is correct. Confirm by opening in a browser tab, GIMP, or Paint.NET instead. | No code change; verify with an alpha-aware viewer |
+
+## Open / deferred items
+
+- Camera distance/framing ("move camera closer to chair") — deferred until
+  Phase 4 metrics are available. Only revisit if the numbers (not just visual
+  impression) suggest framing is masking or exaggerating differences.
+- Per-mesh-normalized evaluation (separate camera correction per ratio, as an
+  addition to the fixed-rig approach) — explicitly out of scope for now,
+  logged as a possible post-core-pipeline optimization if time permits.
+- Texture re-baking strategy at aggressive decimation ratios — parked until
+  evaluation results show whether it's actually needed.
+
+## Dependencies (Phase 4 — install without touching the existing env)
+
+Phase 3 itself only needs Blender's bundled Python (`bpy`), no extra
+installs. Phase 4 (PSNR/SSIM/Chamfer/Hausdorff) needs a few new packages in
+the `2d_to_3d` conda env. Because torchmcubes' CUDA build was fragile to set
+up (pinned MSVC v143, CUDA 11.8, Ninja generator — see Phase 0 notes), **do
+not let any new package silently upgrade or reinstall `torch`.**
+
+Safe install sequence:
+
+```powershell
+conda activate 2d_to_3d
+
+# Image metrics — lightweight, no torch dependency
+pip install scikit-image
+
+# Mesh distance metrics — trimesh is lighter and less likely to conflict
+# than open3d (open3d pulls its own numpy/torch-adjacent deps and is a much
+# heavier install; avoid it unless trimesh proves insufficient)
+pip install trimesh scipy
+```
+
+After installing, **immediately verify torch/CUDA still work** before doing
+anything else:
+
+```powershell
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+If `torch.cuda.is_available()` prints `False` or the version changed
+unexpectedly, something in the above pulled a conflicting dependency — stop
+and roll back (`pip install torch==<original_version> --force-reinstall
+--no-deps` using whatever version Phase 0 had) before continuing.
+
+If `trimesh` turns out to be insufficient for a needed operation later
+(e.g. more robust Hausdorff distance, mesh sampling utilities), evaluate
+`open3d` as a fallback — but install it in a **separate venv** first to
+confirm it doesn't conflict, rather than installing directly into
+`2d_to_3d`.

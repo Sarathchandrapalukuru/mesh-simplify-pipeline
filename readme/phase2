@@ -1,0 +1,101 @@
+# Phase 2 — Remeshing (High-Poly → Low-Poly)
+
+## Goal
+Take the frozen TripoSR high-poly textured mesh from Phase 1 and produce
+controllable low-poly variants at multiple decimation ratios, preserving
+UV mapping so the same `texture.png` can still be applied to each
+reduced mesh.
+
+## Approach
+- **Library:** PyMeshLab
+- **Filter:** `meshing_decimation_quadric_edge_collapse_with_texture` —
+  the UV-aware variant of Quadric Edge Collapse Decimation (QECD). Chosen
+  over the plain (non-textured) QECD filter because the plain version
+  does not track UV coordinates during collapse, which would break
+  texture mapping on the decimated mesh.
+- **Target ratios:** `[0.5, 0.2, 0.1, 0.05]` (fraction of original face
+  count), configurable via `config.DECIMATION_RATIOS`.
+- **Output layout:** each ratio gets its own self-contained folder
+  (`mesh.obj` + a copied `texture.png`), so nothing downstream (Blender,
+  Phase 3) depends on a shared/relative texture path.
+
+## Key parameters (confirmed against installed PyMeshLab version via
+`ms.filter_parameter_values(...)`, since exact param names/defaults
+have shifted across PyMeshLab releases and are not reliably documented)
+
+| Param | Value | Why |
+|---|---|---|
+| `targetfacenum` | computed per ratio | desired face count after collapse |
+| `qualitythr` | `0.0` | **must be 0.** Default (0.3) silently caps decimation early — see bug #1 below |
+| `extratcoordw` | `1.0` | weights UV-stretch cost into the quadric error metric, so collapses that badly distort texture are penalized (but not blocked) |
+| `preserveboundary` | `False` | **must be False.** True locks any edge on a UV seam from collapsing — see bug #2 below |
+| `optimalplacement` | `True` | better vertex repositioning than naive edge-midpoint collapse |
+| `preservenormal` | `True` | avoid flipping face orientation during collapse |
+| `planarquadric` | `True` | improves collapse behavior on flat/planar regions |
+
+## Bugs found & fixed during implementation
+
+**Bug 1 — parameter name mismatch.**
+Initial attempt used `qualitythreshold` (guessed name) — PyMeshLab
+rejected it. Correct name in the installed version is `qualitythr`.
+Lesson: always confirm filter param names against the installed version
+directly (`ms.filter_parameter_values(filter_name)`) rather than
+trusting older docs/tutorials, since PyMeshLab's API has changed across
+versions.
+
+**Bug 2 — decimation silently plateaus regardless of target ratio.**
+Symptom: ratios 0.2 / 0.1 / 0.05 all produced the *same* final face
+count (34,400) instead of tracking their individual targets — only
+ratio 0.5 worked correctly.
+- First hypothesis (wrong): `qualitythr` quality floor was blocking
+  further collapses. Set to 0 — plateau persisted.
+- Root cause (confirmed via isolated repro with a synthetic
+  multi-UV-island mesh): `preserveboundary=True` treats UV seam edges
+  the same as mesh boundary edges. TripoSR's `xatlas`-generated UV
+  unwrap produces many UV islands/seams, so a large fraction of edges
+  were locked from collapsing entirely — decimation had almost no edges
+  left it was allowed to touch once the "easy" (non-seam) ones were
+  used up, hence the hard plateau.
+- Fix: `preserveboundary=False`. Verified against a synthetic
+  UV-seam-heavy mesh (20 islands): with `True`, decimation performed
+  **zero** collapses (40→40 faces even with target=4); with `False`, it
+  correctly reduced (40→20).
+
+**Known tradeoff (intentionally not solved here):** disabling
+`preserveboundary` means collapses can now cross UV seams, which can
+distort texture mapping at aggressive ratios. `extratcoordw` partially
+penalizes this but doesn't prevent it. This is **parked for Phase 3/4
+evaluation** — texture/UV distortion at aggressive decimation ratios is
+meant to be measured (PSNR/SSIM, visual failure analysis), not
+suppressed at the decimation step.
+
+## Usage
+```powershell
+conda activate 2d_to_3d
+python pipeline\phase2_remesh\remesh.py --run_id chair_run1
+```
+Optional: `--ratios 0.5 0.25 0.1` to override `config.DECIMATION_RATIOS`.
+
+## Output
+```
+data/outputs/<run_id>/phase2_lowpoly/
+├── ratio_0.5/   mesh.obj, texture.png
+├── ratio_0.2/   mesh.obj, texture.png
+├── ratio_0.1/   mesh.obj, texture.png
+├── ratio_0.05/  mesh.obj, texture.png
+└── phase2_stats.json   # original/target/final face+vertex counts per ratio
+```
+
+## Status
+Functionally complete and verified against real `chair_run1` output —
+face counts now track targets correctly across all ratios. Visual
+quality at aggressive ratios (0.1, 0.05) has not yet been assessed
+rigorously; that's Phase 3/4 scope.
+
+## Open items for later phases
+- Whether `extratcoordw` weighting meaningfully reduces texture
+  distortion vs. disabling it entirely — worth an ablation if time
+  allows.
+- Texture re-baking at aggressive ratios (parked, per project-level notes).
+- Effect of Phase 1's `mc-resolution` (reconstruction density) on the
+  decimation quality curve — currently held constant across all runs.
