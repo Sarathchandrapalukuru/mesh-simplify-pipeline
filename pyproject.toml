@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline"
+version = "0.1.0"
+description = "2D-to-3D mesh reconstruction + quality-preserving compression pipeline"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]

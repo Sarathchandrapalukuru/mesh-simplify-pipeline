@@ -1,0 +1,38 @@
+C:\education\final year project\project\
+├── TripoSR\                      # untouched, frozen, vendor code
+│
+├── pipeline\                      # your actual project code — new
+│   ├── __init__.py
+│   ├── config.py                  # shared paths, constants (ratios, dirs)
+│   │
+│   ├── phase1_reconstruct\        # wraps calls into TripoSR
+│   │   └── reconstruct.py
+│   │
+│   ├── phase2_remesh\             # new — this phase
+│   │   ├── __init__.py
+│   │   ├── remesh.py              # decimate() using pymeshlab
+│   │   └── io_utils.py            # load/save mesh + texture-copy helper
+│   │
+│   ├── phase3_evaluate\           # next phase — Blender render + PSNR/SSIM, Chamfer
+│   │   ├── render_harness.py
+│   │   └── metrics.py             # equalness function lives here
+│   │
+│   └── common\
+│       ├── mesh_utils.py          # shared helpers (face count, texture path resolution)
+│       └── logging_utils.py
+│
+├── data\
+│   ├── inputs\                    # source 2D images
+│   ├── outputs\
+│   │   ├── phase1_highpoly\
+│   │   │   └── <run_id>\model.obj, model.mtl, texture.png
+│   │   ├── phase2_lowpoly\
+│   │   │   └── <run_id>\ratio_0.5\, ratio_0.2\, ratio_0.1\, ratio_0.05\
+│   │   │       each containing model.obj, model.mtl, texture.png (copied)
+│   │   └── phase3_eval\
+│   │       └── <run_id>\renders\, metrics.json
+│
+├── notebooks\                     # optional scratch/exploration
+├── tests\                         # unit tests per phase, once you want them
+├── environment.yml                # conda env export (2d_to_3d)
+└── README.md
