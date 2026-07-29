@@ -1,8 +1,0 @@
-# TripoSR (external dependency — not vendored)
-
-This project uses [TripoSR](https://github.com/VAST-AI-Research/TripoSR) 
-for Phase 1 (image-to-3D reconstruction). It is **not included** in this 
-repository — you need to clone/install it separately.
-
-## Setup
-It will be explained in main Readme
